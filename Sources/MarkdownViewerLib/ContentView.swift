@@ -19,6 +19,15 @@ public struct ResolvedBatch: Identifiable {
     public let diff: String
 }
 
+// MARK: - Note Editor State
+
+public struct NoteEditor: Identifiable {
+    public let id = UUID()
+    public var content: String
+    public var editingIndex: Int?
+    public var afterHeading: String?
+}
+
 // MARK: - TOC Entry
 
 public struct TOCEntry: Identifiable {
@@ -184,13 +193,8 @@ public struct ContentView: View {
     @State private var showComments = false
     @State private var resolvedNotes: [ResolvedBatch] = []
     @State private var previousNotes: [String] = []
-    @State private var showNoteEditor = false
-    @State private var noteContent = ""
-    @State private var editingNoteIndex: Int?
-    @State private var insertAfterHeading: String?
-    @State private var voiceInputEnabled = false
+    @State private var openEditors: [NoteEditor] = []
     @FocusState private var isSearchFocused: Bool
-    @FocusState private var isNoteFocused: Bool
 
     public init(document: MarkdownDocument, fileURL: URL? = nil) {
         self.document = document
@@ -257,9 +261,13 @@ public struct ContentView: View {
                     },
                     onCopyDone: { showCopiedToast() },
                     onExportHTML: { html in saveHTMLFile(html) },
-                    onEditNote: { index, content in openNoteEditor(index: index, content: content) },
-                    onAddNoteAtHeading: { heading in openNoteEditor(afterHeading: heading) }
+                    onEditNote: { index, content in addEditor(index: index, content: content) },
+                    onAddNoteAtHeading: { heading in addEditor(afterHeading: heading) }
                 )
+                ForEach($openEditors) { $editor in
+                    Divider()
+                    inlineNoteEditor(editor: $editor)
+                }
             }
             if showComments {
                 Divider()
@@ -284,7 +292,7 @@ public struct ContentView: View {
         .focusedValue(\.copySource, copySource)
         .focusedValue(\.copyRendered, copyRendered)
         .focusedValue(\.exportHTML, exportHTML)
-        .focusedValue(\.addNote, { openNoteEditor() })
+        .focusedValue(\.addNote, { addEditor() })
         .focusedValue(\.zoomIn, { zoomLevel = min(zoomLevel + 0.1, 3.0) })
         .focusedValue(\.zoomOut, { zoomLevel = max(zoomLevel - 0.1, 0.5) })
         .focusedValue(\.zoomReset, { zoomLevel = 1.0 })
@@ -309,75 +317,52 @@ public struct ContentView: View {
             if showDiff { updateDiff() }
             detectResolvedNotes()
         }
-        .sheet(isPresented: $showNoteEditor) {
-            noteEditorSheet
-        }
     }
 
-    // MARK: - Note Editor Sheet
+    // MARK: - Inline Note Editor
 
-    private var noteEditorSheet: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(editingNoteIndex != nil ? "Edit Review Note" : "New Review Note")
-                    .font(.headline)
-                Spacer()
-                if voiceInputEnabled {
-                    Image(systemName: "mic.fill")
-                        .foregroundStyle(.red)
-                        .font(.caption)
-                    Text("Voice input enabled")
-                        .font(.caption)
+    private func inlineNoteEditor(editor: Binding<NoteEditor>) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "bubble.left.fill")
+                    .foregroundColor(.accentColor)
+                    .font(.caption)
+                Text(editor.wrappedValue.editingIndex != nil ? "Edit Note" : "New Note")
+                    .font(.system(size: 11, weight: .semibold))
+                if let heading = editor.wrappedValue.afterHeading, !heading.isEmpty {
+                    Text("after \"\(heading)\"")
+                        .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
-            }
-
-            if let heading = insertAfterHeading, !heading.isEmpty {
-                Text("After: \(heading)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            TextEditor(text: $noteContent)
-                .font(.body)
-                .frame(minHeight: 120)
-                .focused($isNoteFocused)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Cmd+double-click in the document to add a note at a section")
-                Text("Cmd+Shift+M to toggle voice input")
-                Text("Notes are saved as ```review blocks — Claude Code can read them")
-            }
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
-
-            HStack {
-                Button("Cancel") {
-                    dismissNoteEditor()
-                }
-                .keyboardShortcut(.cancelAction)
-
                 Spacer()
-
-                Button("Delete Note") {
-                    deleteNote()
+                Text("Cmd+dblclick to add at section")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+            TextEditor(text: editor.content)
+                .font(.system(size: 12))
+                .frame(height: 60)
+                .border(Color.secondary.opacity(0.2))
+            HStack(spacing: 8) {
+                Button("Save") { saveEditor(editor.wrappedValue) }
+                    .font(.caption)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(editor.wrappedValue.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if editor.wrappedValue.editingIndex != nil {
+                    Button("Delete") { deleteFromEditor(editor.wrappedValue) }
+                        .font(.caption)
+                        .controlSize(.small)
+                        .foregroundStyle(.red)
                 }
-                .foregroundStyle(.red)
-                .opacity(editingNoteIndex != nil ? 1 : 0)
-                .disabled(editingNoteIndex == nil)
-
-                Button("Save") {
-                    saveNote()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(noteContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("Close") { closeEditor(editor.wrappedValue.id) }
+                    .font(.caption)
+                    .controlSize(.small)
             }
         }
-        .padding(20)
-        .frame(minWidth: 500, minHeight: 250)
-        .onAppear {
-            isNoteFocused = true
-        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.bar)
     }
 
     // MARK: - TOC Sidebar
@@ -432,7 +417,7 @@ public struct ContentView: View {
                 .help("Compare file against last commit or remote (Cmd+D)")
             }
             actionButton("Note", icon: "plus.bubble") {
-                openNoteEditor()
+                addEditor()
             }
             .help("Add a review note — saved as ```review block in the file (Cmd+Shift+N)")
 
@@ -557,7 +542,7 @@ public struct ContentView: View {
                 .font(.system(size: 11))
                 .lineLimit(3)
             HStack(spacing: 4) {
-                Button("Edit") { openNoteEditor(index: index, content: note) }
+                Button("Edit") { addEditor(index: index, content: note) }
                     .font(.caption2)
                 Button("Delete") { deleteNoteAt(index) }
                     .font(.caption2)
@@ -857,46 +842,41 @@ public struct ContentView: View {
 
     // MARK: - Review Notes
 
-    private func dismissNoteEditor() {
-        showNoteEditor = false
-        noteContent = ""
-        editingNoteIndex = nil
-        insertAfterHeading = nil
+    private func addEditor(index: Int? = nil, content: String = "", afterHeading: String? = nil) {
+        let editor = NoteEditor(content: content, editingIndex: index, afterHeading: afterHeading)
+        openEditors.append(editor)
     }
 
-    private func openNoteEditor(index: Int? = nil, content: String = "", afterHeading: String? = nil) {
-        editingNoteIndex = index
-        noteContent = content
-        insertAfterHeading = afterHeading
-        showNoteEditor = true
+    private func closeEditor(_ id: UUID) {
+        openEditors.removeAll { $0.id == id }
     }
 
-    private func saveNote() {
+    private func saveEditor(_ editor: NoteEditor) {
         guard let url = fileURL else { return }
-        let trimmed = noteContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = editor.content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
         let sanitized = ReviewNote.sanitizeContent(trimmed)
         var content = currentText
         let noteBlock = "\n\n```review\n\(sanitized)\n```\n"
 
-        if let index = editingNoteIndex {
+        if let index = editor.editingIndex {
             content = ReviewNote.replace(at: index, with: sanitized, in: content)
-        } else if let heading = insertAfterHeading, !heading.isEmpty {
+        } else if let heading = editor.afterHeading, !heading.isEmpty {
             content = ReviewNote.insertAfterHeading(heading, note: noteBlock, in: content)
         } else {
             content += noteBlock
         }
 
         try? content.write(to: url, atomically: true, encoding: .utf8)
-        dismissNoteEditor()
+        closeEditor(editor.id)
     }
 
-    private func deleteNote() {
-        guard let url = fileURL, let index = editingNoteIndex else { return }
+    private func deleteFromEditor(_ editor: NoteEditor) {
+        guard let url = fileURL, let index = editor.editingIndex else { return }
         let content = ReviewNote.replace(at: index, with: nil, in: currentText)
         try? content.write(to: url, atomically: true, encoding: .utf8)
-        dismissNoteEditor()
+        closeEditor(editor.id)
     }
 
     // MARK: - File Watcher
